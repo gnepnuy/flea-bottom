@@ -5,12 +5,24 @@ import './ReentrancyGuard.sol';
 import './EIP712.sol';
 import './OrderStruct.sol';
 import './Context.sol';
+import './IERC721.sol';
 
 
 contract FleaBottom is EIP712,ReentrancyGuard,Context{
 
     string constant public NAME = "FleaBottom";
     string constant public VERSION = "1.0";
+    uint256 constant public INVERSE_BASIS_POIN = 10_000;
+
+
+    event OrdersMatched(
+        address indexed maker,
+        address indexed taker,
+        Order sell,
+        bytes32 sellHash,
+        Order buy,
+        bytes32 buyHash
+    );
 
 
     constructor() {
@@ -43,16 +55,47 @@ contract FleaBottom is EIP712,ReentrancyGuard,Context{
         require(_validateSignature(buy,buyOrderHash),'Buy order signature error');
 
         //匹配订单
-        (uint256 price,uint256 tokenId,uint256 amount) = _canMatchOrder(sell.order, buy.order);
+        (uint256 price,uint256 tokenId,) = _canMatchOrder(sell.order, buy.order);
 
         //记录订单hash到filled
 
+        cancelOrfilled[sellOrderHash] = true;
+        cancelOrfilled[buyOrderHash] = true;
+
         //划转token
+        //eth划给卖家，这里就先只收取版税，市场的交易费收取代码先不写
+        _executeFundTransfer(price,sell.order.trader,buy.order.trader,sell.order.fee);
+        _executeTokenTransfer(sell.order.collection, sell.order.trader, buy.order.trader, tokenId);
 
-
+        emit OrdersMatched(
+            buy.order.trader,
+            sell.order.trader,
+            sell.order,
+            sellOrderHash,
+            buy.order,
+            buyOrderHash);
     }
 
-    function _canMatchOrder(Order calldata sell,Order calldata buy) internal returns(uint256 price,uint256 tokenId,uint256 amount){
+    function _executeTokenTransfer(address collection,address seller,address buyer,uint256 tokenId)internal{
+        IERC721(collection).safeTransferFrom(seller, buyer, tokenId);
+    }
+
+    function _executeFundTransfer(uint256 price,address seller,address buyer,Fee calldata fee) internal {
+        require(msg.sender == buyer,'Cannot use ETH');
+        require(msg.value >= price,'Insufficient value');
+        //计算下版税
+        uint256 buyerFee = price * fee.rate /INVERSE_BASIS_POIN;
+        _transferTo(fee.recipient,buyerFee);
+        _transferTo(seller, price - buyerFee);
+    }
+
+    function _transferTo(address to,uint256 amount)internal{
+        require(to != address(0), "Transfer to zero address");
+        (bool success,) = payable(to).call{value: amount}("");
+        require(success, "ETH transfer failed");
+    }
+
+    function _canMatchOrder(Order calldata sell,Order calldata buy) internal pure returns(uint256 price,uint256 tokenId,uint256 amount){
         bool canMatch = (sell.side != buy.side
                         && sell.paymentToken == buy.paymentToken
                         && sell.collection == buy.collection
@@ -60,13 +103,7 @@ contract FleaBottom is EIP712,ReentrancyGuard,Context{
                         && sell.price == buy.price
                         && sell.amount ==1
                         && buy.amount ==1);
-        // if(sell.listingTime <= buy.listingTime){
-        //     //卖方出价
-        //     return
-
-        // }else{
-
-        // }
+      
         require(canMatch,'Orders cannot be matched');
         return (sell.price,sell.tokenId,sell.amount);
     }
